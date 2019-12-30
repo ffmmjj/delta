@@ -62,7 +62,7 @@ class DeltaHistoryManager(
   def getHistory(limitOpt: Option[Int]): Seq[CommitInfo] = {
     val listStart = limitOpt.map { limit =>
       math.max(deltaLog.update().version - limit + 1, 0)
-    }.getOrElse(getEarliestDeltaFile)
+    }.getOrElse(getEarliestReproducibleCommit)
     getHistory(listStart, None)
   }
 

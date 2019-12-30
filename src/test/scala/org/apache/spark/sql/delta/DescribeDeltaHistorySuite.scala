@@ -16,16 +16,19 @@
 
 package org.apache.spark.sql.delta
 
-import org.apache.spark.sql.delta.actions.CommitInfo
+import java.nio.file.{Files, Paths}
+import java.nio.file.attribute.FileTime
+import java.time.{Duration, Instant}
+
+import org.apache.spark.sql.delta.actions.{CommitInfo, Metadata}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.delta.test.DeltaSQLCommandTest
-import org.scalatest.Tag
-
-import org.apache.spark.sql.{AnalysisException, Column, DataFrame, QueryTest, Row}
 import org.apache.spark.sql.execution.streaming.MemoryStream
-import org.apache.spark.sql.functions._
 import org.apache.spark.sql.test.SharedSparkSession
+import org.apache.spark.sql._
+import org.apache.spark.unsafe.types.CalendarInterval
 import org.apache.spark.util.Utils
+import org.scalatest.Tag
 
 trait DescribeDeltaHistorySuiteBase
   extends QueryTest
@@ -332,6 +335,40 @@ trait DescribeDeltaHistorySuiteBase
         assert(operationMetrics("numSourceRows") == "100")
       }
     }
+  }
+
+  testWithFlag("does not return non-reproducible versions") {
+    withSQLConf("spark.databricks.delta.properties.defaults.checkpointInterval" -> "2") {
+      val tempDir = Utils.createTempDir().toString
+      // Create versions 0 and 1
+      Seq(1, 2, 3).toDF().write.format("delta").mode("overwrite").save(tempDir)
+      Seq(1, 2, 3).toDF().write.format("delta").mode("overwrite").save(tempDir)
+
+      // Set v0 last modified date to more than DeltaConfigs.LOG_RETENTION days ago so that
+      // it gets deleted when the checkpoint is created
+      val zerothDeltaFilePath = Paths.get(tempDir, "_delta_log").toFile
+        .listFiles()
+        .filter(_.getName.matches("0+\\.json"))
+        .head
+        .toPath
+      val currentLogRetentionPeriodInDays =
+        calendarIntervalToDays(DeltaConfigs.LOG_RETENTION.fromMetaData(Metadata()))
+      val enoughDaysToExpireLogs = currentLogRetentionPeriodInDays + 1
+      val expiredDate: Instant = Files.getLastModifiedTime(zerothDeltaFilePath).toInstant
+        .minus(Duration.ofDays(enoughDaysToExpireLogs))
+      Files.setLastModifiedTime(zerothDeltaFilePath, FileTime.from(expiredDate))
+
+      // Force creation of checkpoint by creating versions 2 and 3
+      Seq(1, 2, 3).toDF().write.format("delta").mode("overwrite").save(tempDir)
+      Seq(1, 2, 3).toDF().write.format("delta").mode("overwrite").save(tempDir)
+
+      val historyVersions = getHistory(tempDir).select("version").collect().map(_.getLong(0)).toSet
+      assert(historyVersions === Set(2, 3))
+    }
+  }
+
+  private def calendarIntervalToDays(currentLogRetentionPeriod: CalendarInterval) = {
+    currentLogRetentionPeriod.microseconds / CalendarInterval.MICROS_PER_DAY
   }
 }
 
